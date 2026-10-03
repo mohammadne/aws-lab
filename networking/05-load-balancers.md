@@ -161,14 +161,38 @@ flowchart TB
 
 ---
 
-## 4. Which type of load balancer?
+## 4. ALB or NLB?
 
-| Type | Works at | Pick it when | Notable |
-|---|---|---|---|
-| **Application Load Balancer (ALB)** | HTTP, HTTPS, WebSocket, gRPC | Web apps and APIs. **The default choice** | A proxy (Section 3): rules by host or path, HTTPS certificates, user login, a web application firewall (AWS WAF) |
-| **Network Load Balancer (NLB)** | TCP, UDP, TLS | Non-HTTP protocols, extreme traffic, or **fixed IP addresses** (one per AZ, can be Elastic IPs, so partners can allow-list them) | **Passes the customer's IP through**, so the server sees the real client address |
-| **Gateway Load Balancer (GWLB)** | Any IP traffic | Inserting third-party firewalls or inspection appliances | Specialized |
-| Classic Load Balancer | — | Never for new work | Legacy |
+**Start with an ALB.** Use an NLB when you need something only it can do.
+
+**Use an ALB (Application Load Balancer) when:**
+- The traffic is **HTTP or HTTPS**: websites, REST APIs, gRPC, WebSockets.
+- You want **routing by request content**: `/api/*` to one target group, `admin.shop.com` to another, so one ALB serves many services.
+- You want the load balancer to **handle HTTPS**: free ACM certificates, decryption, HTTP → HTTPS redirect.
+- You want HTTP features: **AWS WAF** (web application firewall), user login (OIDC/Cognito), redirects, fixed responses, header-based rules, or Lambda functions as targets.
+- Remember it's a **proxy** (Section 3): servers see the node's IP, and the client IP arrives in `X-Forwarded-For`.
+
+**Use an NLB (Network Load Balancer) when:**
+- The traffic **isn't HTTP**: databases, MQTT, SMTP, game servers, DNS (**UDP**), or any custom TCP protocol.
+- You need **fixed IP addresses**: exactly one per enabled AZ, which can be your own Elastic IPs, so partners and firewalls can allow-list them. ALB IPs change.
+- The **server must see the client's real IP** at the network level, without reading HTTP headers.
+- You need **very high throughput or very low latency**: millions of connections, long-lived TCP connections.
+- You want to **publish a service over PrivateLink** to other VPCs or accounts (Module 07). Endpoint services require an NLB (or a Gateway Load Balancer).
+- You want TLS passed through untouched to the servers (end-to-end encryption). An NLB can also terminate TLS if you prefer.
+
+| | ALB | NLB |
+|---|---|---|
+| Works at | HTTP/HTTPS (layer 7) | TCP/UDP/TLS (layer 4) |
+| Routing by path or host | ✅ | ❌ (one target group per listener) |
+| IP addresses | Change as it scales (use the DNS name) | **Static**, one per AZ, can be Elastic IPs |
+| Client IP at the server | `X-Forwarded-For` header | Preserved |
+| WAF, user login | ✅ | ❌ |
+| UDP | ❌ | ✅ |
+| PrivateLink provider | ❌ | ✅ |
+
+**Need both?** Put an **NLB in front of an ALB**. An NLB can forward to an ALB as its target, so you get fixed IPs from the NLB plus HTTP routing and WAF from the ALB.
+
+Two other types exist: the **Gateway Load Balancer** (for inserting third-party firewalls or inspection appliances, specialized) and the legacy **Classic Load Balancer** (don't use it for new work).
 
 ---
 

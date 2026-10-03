@@ -137,10 +137,33 @@ Read it as: *"Anything for `10.0.x.x` stays inside the VPC. Everything else (`0.
 
 The rules that matter:
 1. **Route tables are attached to subnets, not to servers.** Each subnet is associated with **exactly one** route table, and one table can serve many subnets. A server simply uses the route table of the subnet it's in. If you don't associate a subnet with a table, it uses the VPC's **main route table**.
-2. **The `local` route is automatic and can't be removed.** It's why all subnets of a VPC can reach each other by default. Firewalls (Module 03) are what restrict that.
+2. **Every table has a `local` route, and you can't remove it.** It's explained in the next subsection.
 3. **The most specific match wins.** For a packet to `10.0.20.5`, the route `10.0.0.0/16` beats `0.0.0.0/0`, because it matches more leading bits (`/16` vs `/0`).
 4. **The source subnet's table decides.** Each packet is routed by the table of the subnet it **leaves from**. Replies are routed by the table of the subnet *they* leave from.
 5. **If a route's target is deleted** (say, a NAT gateway), the route shows `blackhole` and its traffic is dropped.
+
+### The `local` route: traffic that stays inside the VPC
+
+Every route table in the VPC starts with this route, and AWS adds it automatically:
+
+```text
+10.0.0.0/16  →  local
+```
+
+- **Destination `10.0.0.0/16`** is the VPC's own address range: every subnet, in every AZ.
+- **Target `local`** means *"don't send this to any gateway: deliver it directly inside the VPC."* The VPC router knows which network interface owns every IP address in the VPC, so it hands the packet straight to that interface, whatever subnet or AZ it's in.
+
+**Example.** `app-1` (`10.0.10.37`, subnet `app-a`, AZ 1) connects to a database at `10.0.21.5` (subnet `data-b`, AZ 2):
+1. `app-1` sends the packet to its default gateway, the router at `10.0.10.1`.
+2. The router uses the route table of **`app-a`** (the source subnet). `10.0.21.5` matches `10.0.0.0/16 → local`, which is more specific than `0.0.0.0/0`.
+3. The packet is delivered directly to the database's network interface in `data-b`, after the network ACL and security group checks (Module 03). No gateway is involved, even though it crossed AZs.
+
+What follows from this:
+- **There's one `local` route per address range of the VPC**: the main IPv4 range, any secondary range you add, and the IPv6 range. You don't add a route per subnet. One `local` route covers them all.
+- **You can't delete or override it to isolate subnets.** All subnets of a VPC can always route to each other. To *block* traffic between subnets, use **security groups and network ACLs** (Module 03), not routing.
+- **It also completes inbound internet traffic.** After the internet gateway translates a public IP into a private one (Section 3), it's the `local` route that carries the packet to the server.
+- *If you know traditional routers:* `local` plays the role of the **connected routes**, the networks a router is directly attached to, except that one entry covers the whole VPC.
+- *Advanced:* you can add a **more specific** route for a single subnet's range (e.g. `10.0.21.0/24 → a firewall appliance`) to force traffic between subnets through an inspection device. Longest match wins, so it beats `local` for that subnet.
 
 Routes get into a table in a few ways: the automatic `local` route; **routes you add** (to an internet gateway, NAT gateway, peering connection…); routes **added automatically** by some features, such as S3 gateway endpoints (Module 06); and routes **learned from your office network** over VPN or Direct Connect (Module 07).
 
@@ -162,7 +185,48 @@ So **"public subnet" isn't a setting. It's a subnet whose route table has a rout
 
 ### Public IP addresses
 
-A server also needs a **public IP address** to talk to the internet. Its network interface only has a private IP (like `10.0.0.25`). The internet gateway **translates** between the private IP and the server's public IP in both directions, so the server's operating system never sees the public address. Running `ip addr` on the server shows only `10.0.0.25`.
+A server also needs a **public IP address** to talk to the internet. Two things here often surprise people:
+
+- **The public IP isn't really on the server.** The server's network interface only has its **private IP** (say `10.0.0.25`), and `ip addr` inside the server shows only that. "Assigning a public IP" (auto-assigned or Elastic) means AWS records a **mapping**: public `54.10.20.30` ↔ private `10.0.0.25` of that network interface.
+- **The internet gateway has no IP address at all.** It isn't a router you send packets *to*, and it never appears in `traceroute`. It's the point at the edge of the VPC where AWS **applies that mapping**, in both directions. You only reference it as a route target (`0.0.0.0/0 → igw-…`). In traditional networking terms, it's a **static 1:1 NAT** whose address table lives in AWS, not on an interface.
+
+**How a packet from the internet reaches the server:**
+
+```text
+Client 198.51.100.7  ──►  destination 54.10.20.30
+
+1. Internet routing   AWS announces its public IP ranges to the internet (BGP), so the packet
+                      reaches AWS's network in the Region where 54.10.20.30 is in use.
+2. AWS edge           AWS looks up 54.10.20.30: it's mapped to network interface eni-0abc
+                      (private 10.0.0.25) in a VPC whose internet gateway is igw-0123.
+3. Internet gateway   Rewrites the destination 54.10.20.30 → 10.0.0.25.
+                      The source (198.51.100.7) is unchanged.
+4. Inside the VPC     The local route delivers it to subnet public-a → network ACL (inbound)
+                      → security group (inbound) → the server's network interface.
+5. Server             Receives:  source 198.51.100.7 → destination 10.0.0.25
+```
+
+**How the reply goes back:**
+
+```text
+1. Server             Sends:  source 10.0.0.25 → destination 198.51.100.7
+2. Firewalls          Security group: replies are allowed automatically.
+                      Network ACL (outbound): must allow the client's port (1024–65535).
+3. Route table        public-a's table: 198.51.100.7 matches 0.0.0.0/0 → igw-0123.
+4. Internet gateway   Rewrites the source 10.0.0.25 → 54.10.20.30.
+5. Client             Receives the reply from 54.10.20.30, the address it called.
+```
+
+**Why a public subnet needs both pieces:**
+
+| Missing piece | What happens |
+|---|---|
+| **No public IP** on the server | The internet gateway has no mapping for it. Nothing on the internet can reach it, and its own outbound internet traffic is dropped too |
+| **No `0.0.0.0/0 → igw` route** in the subnet's table | Inbound packets can arrive, but replies (and anything the server starts) have no way out of the VPC |
+
+Two related cases:
+- **IPv6 has no translation.** The public IPv6 address is configured on the network interface itself (`ip addr` shows it), and the internet gateway just forwards packets.
+- **A NAT gateway (Section 4) relies on the same mechanism.** It has a private IP plus an Elastic IP, and the internet gateway maps between them. That's why a NAT gateway must sit in a public subnet.
 
 | Kind of public IPv4 | How you get it | Survives stop/start? | Can move to another server? |
 |---|---|---|---|
@@ -248,6 +312,8 @@ Go back to the diagram at the top. It's the production version of what you just 
 <details><summary>What makes a subnet "public"?</summary>Its route table has a route (usually 0.0.0.0/0) to an internet gateway. The auto-assign public IP setting alone doesn't make it public.</details>
 <details><summary>Is a route table attached to an EC2 instance, a subnet, or the VPC?</summary>It belongs to the VPC and is associated with subnets (each subnet has exactly one, the main table by default). Instances use their subnet's table. It's never attached to an instance.</details>
 <details><summary>Why one NAT gateway per AZ?</summary>A NAT gateway lives in one AZ. If that AZ fails, subnets in other AZs that depend on it lose internet access. Cross-AZ traffic also costs extra.</details>
+<details><summary>What does the target `local` mean, and can you use route tables to stop two subnets of the same VPC from talking?</summary>`local` means "deliver directly inside the VPC" for the VPC's own address range. It's automatic and can't be removed, so routing can't isolate subnets. Use security groups and network ACLs for that.</details>
+<details><summary>Does the internet gateway have a public IP that packets are sent to?</summary>No. It has no IP address. Packets are sent to the server's public IP, and the internet gateway translates that to the server's private IP (and back for replies).</details>
 <details><summary>A server in app-a runs `ip addr`. Does it see the NAT's Elastic IP?</summary>No. It only sees its private IP. Address translation happens in the NAT gateway and the internet gateway.</details>
 
 ---

@@ -1,90 +1,60 @@
 # AWS Tutorials
 
-Compact, diagram-driven tutorials for working with AWS. Each one explains how the service works internally, gives decision tables for design choices, and has hands-on AWS CLI labs. Every tutorial is a folder of **ordered modules**: start at `01-…md` and follow the **Next** links.
+Practical tutorials for working with AWS. Each one introduces the concepts step by step, shows real commands and their output, explains what happened, and ends every module with a hands-on lab you can run with the AWS CLI.
 
-**Suggested order:** IAM → Networking → Storage → ECS → Observability. The short tutorials can be read any time.
+Start each tutorial at its first module and follow the **Next** links. Suggested order:
 
-## 1. [Networking: VPC, EC2 & Beyond](networking/01-foundations.md) (8 modules)
+### 1. [IAM: Users, Roles & Permissions](iam/01-how-access-works.md) (4 modules)
+How AWS decides who may do what. Follow a request from sign-in to "allowed"/"AccessDenied", see how services and apps get credentials without keys, and read a policy line by line.
+1. [How access to AWS works](iam/01-how-access-works.md)
+2. [How AWS services use IAM](iam/02-how-services-use-iam.md)
+3. [Policies in detail](iam/03-policies-in-detail.md)
+4. [Setting up an account the right way](iam/04-secure-account-setup.md)
 
-VPCs, subnets, route tables, IGW/NAT, security groups & NACLs, EC2 networking, load balancers, endpoints, DNS, peering, Transit Gateway, VPN, Direct Connect.
+### 2. [Networking: VPC, EC2 & Load Balancers](networking/01-regions-azs-and-vpcs.md) (8 modules)
+Build the network for a web application: VPC, subnets, routing, internet and NAT gateways, firewalls, servers, a load balancer, private access to AWS services, connections to other networks.
+1. [Regions, Availability Zones & your first VPC](networking/01-regions-azs-and-vpcs.md)
+2. [Subnets, routing & internet access](networking/02-subnets-routing-and-internet-access.md)
+3. [Security groups & network ACLs](networking/03-security-groups-and-nacls.md)
+4. [EC2 instances in your VPC](networking/04-ec2-instances-in-your-vpc.md)
+5. [Load balancers](networking/05-load-balancers.md)
+6. [Private access to AWS services & DNS](networking/06-private-access-and-dns.md)
+7. [Connecting networks: peering, Transit Gateway, VPN, Direct Connect](networking/07-connecting-networks.md)
+8. [Troubleshooting, costs, the full picture & cleanup](networking/08-troubleshooting-costs-and-cleanup.md)
 
-| # | Module |
-|---|---|
-| 01 | [Foundations: how AWS networking works](networking/01-foundations.md) *(includes the tutorial overview)* |
-| 02 | [VPC, subnets & route tables](networking/02-vpc-subnets-and-route-tables.md) |
-| 03 | [Internet access: IGW, NAT, public IPs](networking/03-internet-access.md) |
-| 04 | [Security groups & NACLs](networking/04-security-groups-and-nacls.md) |
-| 05 | [EC2 networking & load balancers](networking/05-ec2-networking-and-load-balancers.md) |
-| 06 | [Private access & DNS](networking/06-private-access-and-dns.md) |
-| 07 | [Connecting networks](networking/07-connecting-networks.md) |
-| 08 | [Operate & review](networking/08-operate-and-review.md) *(lab cleanup)* |
+### 3. [Storage & Databases](storage/01-storage-basics-and-s3.md) (3 modules)
+Which store for which data, and how to use it: S3, EBS, EFS, RDS/Aurora, ElastiCache, DynamoDB.
+1. [Storage basics & Amazon S3](storage/01-storage-basics-and-s3.md)
+2. [Disks for servers: EBS & EFS](storage/02-ebs-and-efs.md)
+3. [Databases & caches](storage/03-databases-and-caches.md)
 
-## 2. [Amazon ECS: Containers on Fargate, EC2 & Spot](ecs/01-ecs-fundamentals.md) (7 modules)
+### 4. [Amazon ECS: Running Containers](ecs/01-what-ecs-is-and-your-first-task.md) (6 modules)
+Run containers in production: task definitions field by field, services behind a load balancer, Fargate vs EC2 vs Spot, deployments and rollbacks, scaling, debugging.
+1. [What ECS is & your first task](ecs/01-what-ecs-is-and-your-first-task.md)
+2. [The task definition, field by field](ecs/02-task-definition-field-by-field.md)
+3. [Services, networking & load balancing](ecs/03-services-networking-and-load-balancing.md)
+4. [Compute: Fargate, Fargate Spot, EC2 & Managed Instances](ecs/04-compute-fargate-ec2-spot.md)
+5. [Deployments & scaling](ecs/05-deployments-and-scaling.md)
+6. [Operating ECS: security, debugging, costs & the full picture](ecs/06-operating-ecs.md)
 
-Task definitions, Fargate vs EC2 vs Managed Instances, Spot, capacity providers, awsvpc networking, ELB internals, Service Connect, deployments, auto scaling, security, troubleshooting.
-
-| # | Module |
-|---|---|
-| 01 | [ECS fundamentals: object model & architecture](ecs/01-ecs-fundamentals.md) *(includes the tutorial overview)* |
-| 02 | [Task definitions](ecs/02-task-definitions.md) |
-| 03 | [Compute: Fargate, EC2, Spot & Managed Instances](ecs/03-compute-fargate-ec2-spot.md) |
-| 04 | [Networking & load balancing](ecs/04-networking-and-load-balancing.md) |
-| 05 | [Services, deployments & scaling](ecs/05-services-deployments-scaling.md) |
-| 06 | [Security, observability & troubleshooting](ecs/06-security-observability-troubleshooting.md) |
-| 07 | [Big picture & decisions](ecs/07-big-picture-and-decisions.md) *(lab cleanup)* |
-
-## 3. [IAM & User Management](iam/01-identities-and-access.md) (short, 3 modules)
-
-| # | Module |
-|---|---|
-| 01 | [Identities & access](iam/01-identities-and-access.md) |
-| 02 | [Policies & how AWS evaluates them](iam/02-policies-and-evaluation.md) |
-| 03 | [Roles, best practices & lab](iam/03-roles-best-practices-and-lab.md) |
-
-## 4. [Storage & Databases](storage/01-choosing-storage.md) (short, 3 modules)
-
-| # | Module |
-|---|---|
-| 01 | [Choosing the right store](storage/01-choosing-storage.md) |
-| 02 | [Block, file & object: EBS, EFS, S3](storage/02-ebs-efs-s3.md) *(S3 lab)* |
-| 03 | [Databases & caches: RDS/Aurora, ElastiCache, DynamoDB](storage/03-databases-and-caches.md) |
-
-## 5. [Observability](observability/01-overview-and-metrics.md) (short, 3 modules)
-
-| # | Module |
-|---|---|
-| 01 | [The observability map & CloudWatch metrics](observability/01-overview-and-metrics.md) |
-| 02 | [Logs, alarms & lab](observability/02-logs-and-alarms.md) |
-| 03 | [Traces & audit: X-Ray, CloudTrail, Config](observability/03-traces-and-audit.md) |
+### 5. [Observability: CloudWatch, X-Ray & CloudTrail](observability/01-metrics.md) (3 modules)
+See what your systems are doing: metrics, logs, alarms, traces, and who changed what.
+1. [Observability basics & CloudWatch metrics](observability/01-metrics.md)
+2. [Logs & alarms](observability/02-logs-and-alarms.md)
+3. [Traces & audit](observability/03-traces-and-audit.md)
 
 ---
 
-## Conventions
+## Before you run the labs
 
-```text
-<tutorial>/
-├── 01-<topic>.md   # module 1 (full tutorials start with a short tutorial overview: course map, key questions)
-├── 02-<topic>.md   # each module: concepts → diagrams → decision tables → gotchas → hands-on lab → "check yourself"
-└── ...             # full tutorials: ≤ 8 modules · short tutorials: 3 modules
-```
+- Install the **AWS CLI v2** and sign in with an administrator identity (the IAM tutorial shows the right way: `aws configure sso`).
+- Run the commands in **bash**. The longer tutorials save resource IDs to a file (`~/aws-lab.env`, `~/ecs-lab.env`), so you can resume later.
+- Some resources cost money while they exist: NAT gateways, load balancers, Fargate tasks, public IPv4 addresses. **Set a budget alert**, and run each tutorial's cleanup (the last module of Networking and ECS; the short labs clean up after themselves).
 
-- **Labs** run in **bash**. Full tutorials save variables to an env file (`~/aws-lab.env` for networking, `~/ecs-lab.env` for ECS) so you can resume, and **the last module has the cleanup**. Short tutorials' mini labs clean up after themselves.
-- **Diagrams** are Mermaid. They render on **GitHub/GitLab** (hover for zoom and full-screen), **Obsidian**, and **VS Code** with the *Markdown Preview Mermaid Support* extension. You can also paste any block into [mermaid.live](https://mermaid.live).
+## Reading the diagrams
 
-### Diagram legend (shared by all tutorials)
+The diagrams are written in Mermaid. They render on GitHub and GitLab (hover over a diagram to zoom), in Obsidian, and in VS Code with the *Markdown Preview Mermaid Support* extension. Colors are used consistently:
 
-| Color | Meaning |
-|---|---|
-| 🟪 purple | Global / AWS-managed control plane |
-| 🟦 blue | Regional resource / private subnet |
-| 🟩 green | Zonal resource / public subnet |
-| 🟥 red | Security (security groups, NACLs, IAM) |
-| 🟧 orange | Gateways, load balancers, connections |
-| 🟨 yellow | Route tables, configuration |
-| 🩵 teal | Compute (instances, tasks, containers) |
-| ⬜ gray | External (users, internet, on-prem) |
+🟪 global or AWS-managed · 🟦 regional / private subnet · 🟩 zonal / public subnet · 🟥 security · 🟧 gateways and load balancers · 🟨 route tables and configuration · 🩵 servers and containers · ⬜ outside AWS
 
-**Arrows:** 🔴 inbound from the internet · 🟢 egress via NAT · 🟣 private access to AWS services · 🔵 internal/VPC-to-VPC · 🟠 hybrid · dashed = association/configuration.
-
-> [!WARNING]
-> The labs create billable resources (NAT gateways, load balancers, Fargate tasks, public IPv4 addresses). Set an AWS budget alert, and always run each tutorial's cleanup.
+Arrows: 🔴 traffic from the internet · 🟢 outbound through NAT · 🟣 private access to AWS services · 🔵 between VPCs or services · 🟠 to on-premises · dashed lines = an association, not traffic.

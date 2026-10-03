@@ -1,82 +1,45 @@
 # Module 07 — Connecting Networks: Peering, Transit Gateway, VPN, Direct Connect
 
-> Connect VPCs to each other and to your data centers, and pick the right option for the job.
+← [All tutorials](../README.md) · **Networking tutorial**, module 7 of 8
+
+Sooner or later your VPC must talk to other networks: a second VPC for shared services, another team's account, your office, or a data center. This module covers the four main tools, from simplest to most powerful. Throughout, remember Module 02: **traffic only flows where route tables send it, and only if security groups allow it.** Every connection below needs routes on **both** sides.
+
+| You need to connect… | Use | One-line summary |
+|---|---|---|
+| Two or three VPCs | **VPC peering** | A private link between exactly two VPCs. Free to create |
+| Many VPCs, and/or on-prem, with separation (prod vs dev) | **Transit Gateway** | A central router that all networks plug into |
+| One **service** to another VPC or account (even with overlapping IP ranges) | **PrivateLink** | Publish a service behind a Network Load Balancer, and consumers reach it through an interface endpoint |
+| Your office or data center, quickly | **Site-to-Site VPN** | Encrypted tunnels over the internet |
+| Your data center, with high and steady traffic | **Direct Connect** | A private fiber connection to AWS |
+| Individual people (laptops) | **Client VPN** | Managed OpenVPN-style remote access |
 
 ---
 
-## 1. Choosing
+## 1. VPC peering
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
-flowchart TB
-    classDef q fill:#fef9c3,stroke:#a16207,color:#422006
-    classDef ok fill:#dcfce7,stroke:#15803d,color:#052e16
+A **peering connection** links two VPCs (same or different account, same or different Region) so their servers can talk using private IPs, as if they were one network. The traffic stays on AWS's network.
 
-    Q1{"Do you need to expose just ONE service<br/>(possibly overlapping CIDRs, one-way)?"}:::q
-    Q2{"HTTP/gRPC service-to-service with<br/>auth policies across many accounts?"}:::q
-    Q3{"How many VPCs need full<br/>network-level connectivity?"}:::q
-    Q4{"Multi-Region / global WAN<br/>with policy-based segmentation?"}:::q
-    PL["🔗 PrivateLink<br/>(NLB + endpoint service)"]:::ok
-    LAT["🕸️ VPC Lattice"]:::ok
-    PEER["🔀 VPC peering"]:::ok
-    TGW["🛰️ Transit Gateway<br/>(+ TGW peering between Regions)"]:::ok
-    CWAN["🌐 AWS Cloud WAN"]:::ok
+**Setting it up takes three steps:**
+1. One VPC **requests** a peering with the other, and the other side **accepts** it.
+2. Add a **route on both sides**: VPC A's route tables send B's range to the peering (`10.1.0.0/16 → pcx-…`), and B's send A's range back (`10.0.0.0/16 → pcx-…`).
+3. **Allow the traffic in security groups.** Within the same Region, you can even reference the other VPC's security groups.
 
-    Q1 -->|"yes"| PL
-    Q1 -->|"no"| Q2
-    Q2 -->|"yes"| LAT
-    Q2 -->|"no"| Q3
-    Q3 -->|"2-5, few changes"| PEER
-    Q3 -->|"many, or on-prem too"| Q4
-    Q4 -->|"no, 1-3 Regions"| TGW
-    Q4 -->|"yes"| CWAN
-```
-
-| Option | Use when | Key limits |
-|---|---|---|
-| **VPC peering** | A few VPCs, high volume, lowest cost | Non-transitive. No overlapping CIDRs. Routes needed **on both sides** |
-| **Transit Gateway** | Many VPCs and/or on-prem, with segmentation | Per attachment-hour + per GB. Static routes in the VPCs |
-| **PrivateLink** | Expose **one service** across accounts (overlap OK) | One-way. Provider needs an NLB/GWLB (Module 06) |
-| **Site-to-Site VPN** | Fast, encrypted link to an office or DC | 2 tunnels. 1.25 Gbps per tunnel (5 Gbps on TGW). MTU ~1446 |
-| **Direct Connect** | Steady high bandwidth, predictable latency | Weeks to provision. **Not encrypted by default** |
-| **Client VPN** | People into the VPC | Managed OpenVPN. Needs authorization rules + routes |
-| **VPC Lattice / Cloud WAN** | Service-to-service networking with auth / a global managed WAN | Newer, higher-level options |
+**Rules to remember:**
+- **IP ranges must not overlap.**
+- **Peering isn't transitive.** If A peers with B, and B peers with C, A **can't** reach C through B. You'd need A↔C directly.
+- **A can't use B's gateways.** It can't reach the internet through B's NAT or internet gateway, or B's office VPN.
+- Ten VPCs that all need to talk to each other would need 45 peerings, each with routes on both sides. That's when you switch to Transit Gateway.
 
 ---
 
-## 2. VPC peering
+## 2. Transit Gateway: a central router
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
-flowchart LR
-    classDef regional fill:#dbeafe,stroke:#1d4ed8,color:#0b1b3a
-    classDef bad fill:#fee2e2,stroke:#b91c1c,color:#450a0a
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
+A **Transit Gateway (TGW)** is a regional router managed by AWS. Instead of linking VPCs pairwise, every network **plugs into** the TGW once:
 
-    VA["☁️ VPC A"]:::regional
-    VB["☁️ VPC B<br/>has IGW + NAT"]:::regional
-    VC["☁️ VPC C"]:::regional
-    NET(("🌐 Internet")):::bad
-    VA <-->|"peering ✅"| VB
-    VB <-->|"peering ✅"| VC
-    VA -.-x|"❌ A to C via B: NOT allowed"| VC
-    VB --> NET
-    VA -.-x|"❌ A to internet via B's IGW/NAT"| NET
-```
-
-- 1:1, same or different account and Region. Traffic stays on the AWS backbone. No hourly charge.
-- **No edge-to-edge routing:** A can't use B's IGW, NAT, VPN, Direct Connect, or gateway endpoints.
-- Add routes in **both** VPCs' subnet route tables (`peer CIDR → pcx-…`) and allow the peer's CIDR (or, in the same Region, its SG) in your SGs.
-- Full mesh grows as N×(N−1)/2. Past a handful of VPCs, switch to Transit Gateway.
-
-## 3. Transit Gateway: a regional hub router with VRFs
-
-| Concept | Meaning | Network analogy |
-|---|---|---|
-| **Attachment** | A VPC, VPN, Direct Connect gateway, TGW peering, or Connect (GRE/BGP) | Interface |
-| **TGW route table** | A routing table inside the TGW | VRF |
-| **Association** | Each attachment uses **exactly one** TGW route table for traffic **coming from** it | Interface → VRF binding |
-| **Propagation** | An attachment **installs its routes** into one or more TGW route tables | Route leaking |
+- An **attachment** is one plug: a VPC, a VPN connection, a Direct Connect gateway, or another Transit Gateway in another Region.
+- A **TGW route table** is a separate routing table **inside** the TGW. Having several lets you keep groups of networks apart, for example prod and dev.
+- **Association:** each attachment is associated with **exactly one** TGW route table. That's the table the TGW uses to route traffic **coming from** that attachment.
+- **Propagation:** an attachment can **publish its routes** (a VPC publishes its address range, a VPN publishes the office's routes) into one or more TGW route tables. Those tables then know how to reach it.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 240}}}%%
@@ -105,15 +68,21 @@ flowchart LR
     ONP ==>|"associated"| RTS
 ```
 
-- A VPC attachment uses **one subnet per AZ** (use small dedicated `/28`s). An AZ without an attachment subnet can't reach the TGW.
-- TGW **never** updates VPC route tables. Add `10.0.0.0/8 → tgw-…` yourself.
-- For A to reach B, **A's associated table** needs a route to B and **B's associated table** needs a route back.
-- Enable **appliance mode** on the attachment of a central inspection VPC, so both directions of a flow use the same firewall.
-- Share a TGW across accounts with AWS RAM. Peer TGWs across Regions (static routes only).
+**How to read it:**
+- Production VPCs use `rt-prod`. It knows routes to the other prod VPCs, shared services, and the office, so prod can reach all of those.
+- The dev VPC uses `rt-dev`. It only knows dev and shared services, plus a **blackhole** route that explicitly drops traffic to the rest of `10.0.0.0/8`. **Dev can't reach prod.**
+- Shared services and the office use `rt-shared`, which knows every network, so they can reach everyone.
+- For two networks to talk, **each side's table must have a route to the other**. Association decides which table *I use*. Propagation decides which tables *know about me*.
+
+Two practical details:
+- **Inside each VPC you still need routes** pointing at the TGW (`10.0.0.0/8 → tgw-…`). The TGW **doesn't** update VPC route tables for you.
+- When you attach a VPC, you pick **one subnet per AZ**, and the TGW places a network interface there. Small dedicated `/28` subnets are common. Servers in an AZ without an attachment subnet can't use the TGW.
+
+The TGW costs per attachment per hour plus per GB processed, so very high-volume pairs of VPCs are sometimes peered directly as well.
 
 ---
 
-## 4. Hybrid connectivity
+## 3. Connecting your office or data center
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 240}}}%%
@@ -150,60 +119,31 @@ flowchart LR
     TGW --> VPCS
 ```
 
+**How to read it:** your router connects either through **VPN tunnels** over the internet, or through a **Direct Connect** fiber line at a colocation facility. Both arrive at a **virtual private gateway** (for one VPC) or a **Transit Gateway** (for many VPCs). The **Direct Connect gateway** in the middle is global, so one physical line can reach VPCs in any Region.
+
 ### Site-to-Site VPN
-- A **customer gateway** resource describes your device (public IP + BGP ASN). AWS gives you **two tunnels** in different AZs: configure **both**, and prefer BGP.
-- It terminates on a **VGW** (one VPC, which can propagate routes into VPC route tables) or a **Transit Gateway** (many VPCs, ECMP across tunnels, 5 Gbps tunnels, accelerated VPN).
+- Create a **customer gateway**. Despite the name, it's just a record describing **your** router: its public IP and BGP number.
+- Create a **VPN connection** to a **virtual private gateway** (attached to one VPC) or to a **Transit Gateway**. AWS gives you **two tunnels**, ending in different AZs. **Configure both**, because AWS maintenance takes one down at a time. AWS also provides a ready-made configuration file for common router brands.
+- Use **BGP** (dynamic routing) so routes are exchanged automatically. On a virtual private gateway, turn on **route propagation** in your VPC route tables, and the office's routes appear there by themselves.
+- About 1.25 Gbps per tunnel, or up to 5 Gbps with "large bandwidth" tunnels on Transit Gateway. Setup takes minutes.
 
 ### Direct Connect
+- A **dedicated physical connection** (1–400 Gbps, or smaller "hosted" connections through partners) from your router to AWS at a **Direct Connect location**. Provisioning takes days to weeks.
+- Each connection carries **virtual interfaces** (VLANs, each with its own BGP session): **private** (to your VPCs), **transit** (to Transit Gateways), or **public** (to AWS public services like S3).
+- It's **not encrypted** by default. Add MACsec, or run a VPN over it, if you need encryption.
+- A common design is Direct Connect as the primary path with a VPN as the backup. For the same destination prefix, AWS prefers Direct Connect over VPN automatically. But the **most specific prefix always wins**, so advertise the same prefixes over both paths.
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
-flowchart LR
-    classDef ext fill:#f1f5f9,stroke:#475569,color:#0f172a
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
-    classDef global fill:#f3e8ff,stroke:#7e22ce,color:#1f1147
-    classDef svc fill:#fef3c7,stroke:#b45309,color:#451a03
-    classDef regional fill:#dbeafe,stroke:#1d4ed8,color:#0b1b3a
+### Client VPN
+A managed remote-access VPN for **people**. Users run a VPN client on their laptops, authenticate (certificates, Active Directory, or single sign-on), and get access to the VPC ranges you authorize.
 
-    subgraph CUST["🏢 Your network"]
-        CR["🧭 Customer router<br/>ASN 65000"]:::ext
-    end
-    subgraph LOC["🏬 Direct Connect location (colo)"]
-        CROUTER["Your router or partner cage"]:::ext
-        XC["🔌 Cross-connect (fiber)<br/>LOA-CFA from AWS"]:::ext
-        AWSR["AWS DX router (port 10G)"]:::gw
-        CROUTER --- XC --- AWSR
-    end
-    CR ===|"your circuit / partner"| CROUTER
-
-    AWSR -->|"VLAN 101 + BGP<br/>PRIVATE VIF"| VGW["🔒 VGW of one VPC<br/>(same Region)"]:::gw
-    AWSR -->|"VLAN 102 + BGP<br/>PRIVATE VIF"| DXGW["🌐 DX gateway (global)"]:::global
-    AWSR -->|"VLAN 103 + BGP<br/>TRANSIT VIF"| DXGW2["🌐 DX gateway (global)"]:::global
-    AWSR -->|"VLAN 104 + BGP<br/>PUBLIC VIF (public IPs)"| PUB["🪣 AWS public endpoints<br/>S3, DynamoDB, public APIs, all Regions"]:::svc
-
-    DXGW --> VGWA["🔒 VGW, VPC in us-east-1"]:::gw
-    DXGW --> VGWB["🔒 VGW, VPC in eu-west-1"]:::gw
-    DXGW2 --> TGW1["🛰️ TGW us-east-1 → many VPCs"]:::gw
-    DXGW2 --> TGW2["🛰️ TGW ap-south-1 → many VPCs"]:::gw
-```
-
-| VIF | Goes to | Use |
-|---|---|---|
-| **Private VIF** | A VGW, or a Direct Connect gateway → VGWs in any Region | VPC private IPs |
-| **Transit VIF** | Direct Connect gateway → Transit Gateways in any Region | Many VPCs |
-| **Public VIF** | AWS public endpoints (public IPs) | S3/public APIs over DX |
-
-- The **Direct Connect gateway is global**, but it doesn't route between its own associations (it's not a VPC-to-VPC path).
-- DX is **unencrypted**: use **MACsec** or run **IPsec VPN over DX**. For resilience, use two locations, or DX plus a VPN backup.
-
-### Route preference (AWS → on-prem)
-1. **Longest prefix** wins, even across DX and VPN.
-2. For the same prefix: static route in the VPC route table > propagated. Then **Direct Connect > VPN static > VPN BGP**.
-3. Influence on-prem → AWS with your own BGP settings. Influence AWS → on-prem with AS-path prepending or the DX local-preference communities (`7224:7100` / `7200` / `7300`).
+### PrivateLink
+To share **one service** rather than a whole network, put it behind a **Network Load Balancer** and publish it as an **endpoint service**. Other accounts create an **interface endpoint** to it (Module 06). It works even if both sides use the same IP ranges, and the consumer can't reach anything else in your VPC.
 
 ---
 
-## 5. Hands-on: VPC peering
+## 4. Try it: peer two VPCs
+
+Create a second small VPC with one server, then peer it with `lab-vpc`:
 
 ```bash
 VPC2=$(aws ec2 create-vpc --cidr-block 10.1.0.0/16 --query Vpc.VpcId --output text); save VPC2
@@ -215,31 +155,42 @@ PEER_ID=$(aws ec2 run-instances --image-id $AMI_ID --instance-type t3.micro --su
 aws ec2 wait instance-running --instance-ids $PEER_ID
 PEER_IP=$(aws ec2 describe-instances --instance-ids $PEER_ID --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text); save PEER_IP
 
-PCX=$(aws ec2 create-vpc-peering-connection --vpc-id $VPC_ID --peer-vpc-id $VPC2 --query VpcPeeringConnection.VpcPeeringConnectionId --output text); save PCX
+PCX=$(aws ec2 create-vpc-peering-connection --vpc-id $VPC_ID --peer-vpc-id $VPC2 \
+  --query VpcPeeringConnection.VpcPeeringConnectionId --output text); save PCX
 aws ec2 accept-vpc-peering-connection --vpc-peering-connection-id $PCX >/dev/null
+echo "peer server: $PEER_IP"
+```
 
-# Route on ONE side only: ping fails (no return route)
+**Route on one side only, then test.** The ping fails, because the peer VPC has no route back:
+
+```bash
 aws ec2 create-route --route-table-id $RT_PRIV --destination-cidr-block 10.1.0.0/16 --vpc-peering-connection-id $PCX
-# Return route (vpc2's subnet uses vpc2's MAIN table): ping works
-VPC2_MAIN_RT=$(aws ec2 describe-route-tables --filters Name=vpc-id,Values=$VPC2 Name=association.main,Values=true --query 'RouteTables[0].RouteTableId' --output text); save VPC2_MAIN_RT
-aws ec2 create-route --route-table-id $VPC2_MAIN_RT --destination-cidr-block 10.0.0.0/16 --vpc-peering-connection-id $PCX
-
-echo "peer IP: $PEER_IP"
 aws ec2-instance-connect ssh --instance-id $APP_ID --connection-type eice
-  ping -c 3 <peer IP>
+  ping -c 3 -W 2 <peer server IP>     # 100% packet loss
   exit
 ```
 
-Try the ping between the two `create-route` commands to watch it fail, then succeed.
+**Add the return route, then test again.** The second VPC's subnet uses its main route table:
+
+```bash
+VPC2_MAIN_RT=$(aws ec2 describe-route-tables --filters Name=vpc-id,Values=$VPC2 Name=association.main,Values=true \
+  --query 'RouteTables[0].RouteTableId' --output text); save VPC2_MAIN_RT
+aws ec2 create-route --route-table-id $VPC2_MAIN_RT --destination-cidr-block 10.0.0.0/16 --vpc-peering-connection-id $PCX
+aws ec2-instance-connect ssh --instance-id $APP_ID --connection-type eice
+  ping -c 3 <peer server IP>          # replies
+  exit
+```
+
+That's the most common real-world peering mistake, reproduced: a route on only one side.
 
 ---
 
 ## Check yourself
 
-<details><summary>A peers with B, and B peers with C. Can A reach C?</summary>No. Peering is non-transitive.</details>
-<details><summary>TGW association vs propagation?</summary>Association: the single table used for traffic from that attachment. Propagation: which tables learn the attachment's routes.</details>
-<details><summary>DX and VPN both advertise 192.168.0.0/16. Which does AWS use?</summary>Direct Connect.</details>
-<details><summary>Is Direct Connect encrypted?</summary>No. Use MACsec or a VPN over DX.</details>
+<details><summary>A peers with B, and B peers with C. Can A reach C?</summary>No. Peering isn't transitive. Peer A with C directly, or use a Transit Gateway.</details>
+<details><summary>In a Transit Gateway, what's the difference between association and propagation?</summary>Association: the one TGW route table an attachment's traffic is routed with. Propagation: the TGW route tables that learn the attachment's routes.</details>
+<details><summary>You attached a VPC to a Transit Gateway and propagated its routes, but there's still no traffic. What did you forget?</summary>Routes in the VPC's own route tables pointing to the TGW. Also check the other side's TGW table and the security groups.</details>
+<details><summary>Is Direct Connect encrypted?</summary>Not by default. Use MACsec or a VPN over it.</details>
 
 ---
-**Previous:** [Module 06](06-private-access-and-dns.md) · **Next:** [Module 08 — Operate & Review](08-operate-and-review.md)
+**Previous:** [Module 06](06-private-access-and-dns.md) · **Next:** [Module 08 — Troubleshooting, Costs & Cleanup](08-troubleshooting-costs-and-cleanup.md)

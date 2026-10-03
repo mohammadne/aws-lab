@@ -1,221 +1,168 @@
-# Module 06 — Private Access & DNS: Endpoints, PrivateLink, Route 53 Resolver
+# Module 06 — Private Access to AWS Services & DNS
 
-> Reach AWS services and other teams' services without the internet or NAT, and understand how name resolution works inside a VPC and to and from on-prem.
+← [All tutorials](../README.md) · **Networking tutorial**, module 6 of 8
+
+Your app servers call AWS services all the time: S3 for files, Systems Manager for sessions, Secrets Manager for passwords, ECR for container images. Those services have **public** addresses (`s3.eu-central-1.amazonaws.com`), so right now `app-1`'s calls leave through the **NAT gateway** and the internet gateway. That works, but it has three downsides:
+
+- The NAT gateway charges **per GB**. Large S3 transfers get expensive quickly.
+- The private servers need an internet path at all, which you may want to forbid (for example, in the data tier).
+- If the NAT has a problem, your AWS calls fail too.
+
+**VPC endpoints** let servers reach AWS services **privately**, without the internet or NAT. This module also explains **DNS** inside a VPC, because one kind of endpoint works by changing what names resolve to.
 
 ---
 
-## 1. VPC endpoints
+## 1. The two kinds of endpoints
 
-| | **Gateway endpoint** | **Interface endpoint** (PrivateLink) | **GWLB endpoint** |
-|---|---|---|---|
-| Services | **S3, DynamoDB only** | Most AWS services, SaaS, your own services | Your firewall fleet behind a GWLB |
-| Mechanism | **Route table** entry `pl-… → vpce-…` | **ENI** with a private IP in each chosen subnet, plus **private DNS** | Route table target, GENEVE to appliances |
-| Security group | ❌ (use the endpoint policy) | ✅ | ❌ |
-| Usable from on-prem / peered VPCs | ❌ | ✅ | via routing |
-| Cost | **Free** | Per AZ-hour + per GB | Per hour + per GB |
+| | **Gateway endpoint** | **Interface endpoint** |
+|---|---|---|
+| For | **S3 and DynamoDB only** | Most other AWS services (SSM, ECR, Secrets Manager, CloudWatch Logs, STS…), plus your own or partners' services |
+| How it works | Adds a **route** to the route tables you choose: "S3's address ranges → this endpoint" | Puts a **network interface with a private IP** in each subnet you choose, and makes the service's normal name resolve to that IP |
+| DNS changes? | No. The name still resolves to public S3 addresses, but the **route** sends the traffic privately | **Yes** (private DNS) |
+| Security group | No (use an endpoint policy) | Yes |
+| Usable from other VPCs or on-prem | No | Yes |
+| Price | **Free** | About $0.01 per hour per AZ + per GB |
 
-### Gateway endpoint: routing-based
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
-flowchart LR
-    classDef zonal fill:#dcfce7,stroke:#15803d,color:#052e16
-    classDef rt fill:#fef9c3,stroke:#a16207,color:#422006
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
-    classDef svc fill:#fef3c7,stroke:#b45309,color:#451a03
-    classDef compute fill:#ccfbf1,stroke:#0f766e,color:#042f2e
-
-    subgraph VPC["☁️ VPC 10.0.0.0/16"]
-        subgraph PRIV["🟦 private subnet app-a"]
-            EC2["🖥️ EC2<br/>aws s3 cp …"]:::compute
-        end
-        RT["📋 rtb-app-a<br/>10.0.0.0/16 → local<br/>0.0.0.0/0 → nat-a<br/>pl-63a5400a (S3 prefixes) → vpce-0s3<br/>(added automatically when you<br/>select this RT on the endpoint)"]:::rt
-        GWE["🛣️ vpce-0s3 (Gateway, S3)<br/>📜 endpoint policy:<br/>allow only bucket my-app-*"]:::gw
-    end
-    S3["🪣 Amazon S3 (same Region)<br/>bucket policy can require<br/>aws:SourceVpce = vpce-0s3"]:::svc
-
-    RT -.- PRIV
-    EC2 -->|"dst 52.216.x.x matches pl-…"| GWE --> S3
-```
-
-DNS doesn't change: the S3 hostname still resolves to public S3 IPs. The **route** is what changes, because the prefix-list route beats `0/0 → nat`. Lock buckets to your VPC with `aws:SourceVpce` conditions in the bucket policy.
-
-### Interface endpoint: ENI + DNS based
+Here's what an app server does when it uses each kind:
 
 ```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+%%{init: {"flowchart": {"wrappingWidth": 340}}}%%
 flowchart TB
-    classDef zonal fill:#dcfce7,stroke:#15803d,color:#052e16
+    classDef compute fill:#ccfbf1,stroke:#0f766e,color:#042f2e
     classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
+    classDef rt fill:#fef9c3,stroke:#a16207,color:#422006
     classDef svc fill:#fef3c7,stroke:#b45309,color:#451a03
-    classDef compute fill:#ccfbf1,stroke:#0f766e,color:#042f2e
     classDef global fill:#f3e8ff,stroke:#7e22ce,color:#1f1147
-    classDef ext fill:#f1f5f9,stroke:#475569,color:#0f172a
+    classDef sec fill:#fee2e2,stroke:#b91c1c,color:#450a0a
 
-    ONP["🏢 On-prem via DX/VPN<br/>(can use interface endpoints)"]:::ext
-    subgraph VPC["☁️ VPC 10.0.0.0/16 (enableDnsHostnames + enableDnsSupport = true)"]
-        DNS["🧭 Private DNS (hidden PHZ)<br/>ssm.us-east-1.amazonaws.com →<br/>10.0.10.100, 10.0.11.100"]:::global
-        subgraph AZA["🅰️ AZ-a"]
-            subgraph SA["🟦 app-a 10.0.10.0/24"]
-                EA["🖥️ EC2"]:::compute
-                ENIA["🔌 endpoint ENI 10.0.10.100<br/>🛡️ sg-endpoints: 443 from VPC"]:::gw
-            end
+    RT["📋 rtb-private (associated with app-a)<br/>10.0.0.0/16 → local<br/>pl-s3 (S3's address ranges) → vpce-s3<br/>0.0.0.0/0 → nat (anything else)"]:::rt
+    subgraph VPC["☁️ VPC 10.0.0.0/16"]
+        DNS["🧭 VPC DNS resolver 10.0.0.2<br/>private DNS: ssm.eu-central-1.amazonaws.com → 10.0.10.200"]:::global
+        subgraph APPSUB["🟦 subnet app-a 10.0.10.0/24"]
+            APP["🖥️ app-1  10.0.10.37"]:::compute
+            IEP["🔌 Interface endpoint ENI 10.0.10.200 (service: ssm)<br/>🛡️ sg-endpoints: HTTPS 443 from 10.0.0.0/16"]:::sec
         end
-        subgraph AZB["🅱️ AZ-b"]
-            subgraph SB["🟦 app-b 10.0.11.0/24"]
-                EB["🖥️ EC2"]:::compute
-                ENIB["🔌 endpoint ENI 10.0.11.100<br/>🛡️ sg-endpoints"]:::gw
-            end
-        end
+        GWE["🛣️ Gateway endpoint vpce-s3<br/>(no network interface: it's a route target)"]:::gw
     end
-    SVC["🛠️ AWS Systems Manager<br/>(regional service)"]:::svc
+    SSM["🛠️ AWS Systems Manager (regional)"]:::svc
+    S3["🪣 Amazon S3 (regional)"]:::svc
 
-    EA -->|"① resolve ssm.us-east-1…"| DNS
-    EA -->|"② HTTPS to 10.0.10.100"| ENIA
-    EB --> ENIB
-    ENIA -->|"③ PrivateLink (AWS network)"| SVC
-    ENIB --> SVC
-    ONP -.->|"via inbound Resolver endpoint + routing"| ENIA
+    APP -->|"① ask: ssm.eu-central-1.amazonaws.com?<br/>answer: 10.0.10.200"| DNS
+    APP -->|"② HTTPS to 10.0.10.200"| IEP
+    IEP -->|"③ private AWS network"| SSM
+    APP -->|"④ HTTPS to an S3 public address:<br/>route table matches pl-s3"| GWE
+    GWE -->|"⑤ private AWS network"| S3
+    RT -.- APPSUB
 ```
 
-- Pick **one subnet per AZ**. Private DNS makes the **normal service hostname** resolve to the endpoint's IPs, so you need **no code changes**.
-- Requires `enableDnsSupport` and `enableDnsHostnames`, plus an endpoint SG allowing **443 from your clients**.
-- **Common sets:** SSM without NAT = `ssm`, `ssmmessages`, `ec2messages`. ECR without NAT = `ecr.api`, `ecr.dkr` **+ the S3 gateway endpoint**.
-- In multi-VPC estates, centralize endpoints in a shared-services VPC to save per-AZ-hour charges.
+**How to read it:**
+- **Interface endpoint, ① to ③.** The app asks the VPC's DNS resolver for the normal service name. Because the endpoint has **private DNS** enabled, the resolver answers with the endpoint's **private** IP in the app's own subnet. The app connects there, and the endpoint carries the request to the service. Your code doesn't change at all.
+- **Gateway endpoint, ④ to ⑤.** DNS still returns S3's public addresses, but the route table has a more specific entry for S3's address ranges (a **prefix list**, `pl-…`, an AWS-maintained list of S3's IP ranges in this Region). It sends that traffic to the endpoint instead of the NAT.
+- **Anything else** still follows `0.0.0.0/0 → nat`.
 
-### PrivateLink for your own services
+**Common endpoint sets:**
+- **Session Manager** without NAT: `ssm`, `ssmmessages`, `ec2messages`.
+- **Pulling container images** from ECR without NAT: `ecr.api`, `ecr.dkr`, plus the **S3 gateway endpoint** (image layers are stored in S3).
+- **Logs and secrets:** `logs`, `secretsmanager`, `kms`, `sts`.
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
-flowchart LR
-    classDef compute fill:#ccfbf1,stroke:#0f766e,color:#042f2e
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
-    classDef regional fill:#dbeafe,stroke:#1d4ed8,color:#0b1b3a
-
-    subgraph CONSUMER["👤 Consumer account: VPC 10.0.0.0/16"]
-        CEC2["🖥️ Client EC2"]:::compute
-        CEP["🔌 Interface endpoint ENIs<br/>10.0.5.10 / 10.0.6.10<br/>🛡️ SG"]:::gw
-        CEC2 --> CEP
-    end
-    subgraph PROVIDER["🏬 Provider account: VPC 10.0.0.0/16 (overlap is OK!)"]
-        SVC["📜 Endpoint service<br/>com.amazonaws.vpce.us-east-1.vpce-svc-0abc<br/>acceptance required, allowed principals"]:::regional
-        NLB["⚖️ Network Load Balancer<br/>(or GWLB)"]:::gw
-        APP["🖥️ Service fleet"]:::compute
-        SVC --- NLB --> APP
-    end
-    CEP ==>|"PrivateLink: one-way,<br/>consumer to provider only"| SVC
-```
-
-Use it to expose **one service** to other VPCs or accounts. It's **one-way** (consumer → provider) and **overlapping CIDRs don't matter**. Compare that with peering, which exposes whole networks.
+**Always add the free S3 gateway endpoint** to private route tables. It removes S3 traffic from the NAT bill. Interface endpoints cost per AZ per hour, so in setups with many VPCs, teams share them from one central VPC.
 
 ---
 
 ## 2. DNS inside a VPC
 
-- The **Route 53 Resolver** answers at **VPC base + 2** (e.g. `10.0.0.2`) and at `169.254.169.253`. It needs `enableDnsSupport`.
-- It resolves public DNS, EC2 names (`ip-10-0-1-5.ec2.internal`), **private hosted zones** associated with the VPC, and endpoint private DNS.
-- Public EC2 hostnames are **split-horizon**: they resolve to the private IP inside the VPC and the public IP outside (needs `enableDnsHostnames`).
-- Limit: 1,024 packets/s per ENI to the Resolver. Cache in chatty apps. DNS traffic **isn't** filtered by SGs and doesn't appear in Flow Logs (use Resolver query logs).
+Every VPC has a **DNS resolver** at its range's base address **+2** (`10.0.0.2` here; `169.254.169.253` also works from any VPC). Servers get it automatically. It answers:
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
-flowchart TB
-    classDef q fill:#fef9c3,stroke:#a16207,color:#422006
-    classDef ok fill:#dcfce7,stroke:#15803d,color:#052e16
-    classDef ext fill:#f1f5f9,stroke:#475569,color:#0f172a
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
+| Kind of name | Example | Answer |
+|---|---|---|
+| Public internet names | `www.google.com` | Normal public DNS |
+| AWS service names | `s3.eu-central-1.amazonaws.com` | Public addresses, or **endpoint private IPs** if an interface endpoint has private DNS on |
+| EC2 instance names | `ip-10-0-10-37.eu-central-1.compute.internal` | The instance's private IP |
+| **Your private DNS zones** | `db.shop.internal` | Whatever records you create (below) |
 
-    Q(["🖥️ Query from an instance to VPC+2"]):::q
-    RULE{"Matching Resolver FORWARD rule?<br/>(most specific domain wins)"}:::q
-    PHZ{"Matching PRIVATE HOSTED ZONE<br/>associated with this VPC?"}:::q
-    INT{"VPC-internal name?<br/>ip-10-0-1-5.ec2.internal,<br/>endpoint private DNS"}:::q
-    PUB["🌍 Recursive resolution<br/>on the public internet DNS"]:::ext
-    FWD["➡️ Forward to target IPs<br/>(e.g. on-prem DNS) via an<br/>OUTBOUND endpoint"]:::gw
-    ANS1["Answer from the private zone"]:::ok
-    ANS2["Answer from VPC records"]:::ok
+### Private hosted zones: your own internal names
 
-    Q --> RULE
-    RULE -->|"yes"| FWD
-    RULE -->|"no"| PHZ
-    PHZ -->|"yes"| ANS1
-    PHZ -->|"no"| INT
-    INT -->|"yes"| ANS2
-    INT -->|"no"| PUB
+Instead of hard-coding IPs or long AWS names in configuration, create a **private hosted zone** in **Route 53** (AWS's DNS service) and **associate it with your VPCs**. Its names resolve **only** inside those VPCs:
+
+```text
+db.shop.internal     CNAME  shop-db.cluster-abc123.eu-central-1.rds.amazonaws.com
+cache.shop.internal  CNAME  shop-cache.xyz.cache.amazonaws.com
+app.shop.internal    A      10.0.10.37
 ```
 
-### Hybrid DNS
+If the database moves, you change one record, not every server's configuration.
 
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
-flowchart TB
-    classDef zonal fill:#dcfce7,stroke:#15803d,color:#052e16
-    classDef gw fill:#ffedd5,stroke:#c2410c,color:#431407
-    classDef ext fill:#f1f5f9,stroke:#475569,color:#0f172a
-    classDef compute fill:#ccfbf1,stroke:#0f766e,color:#042f2e
-    classDef global fill:#f3e8ff,stroke:#7e22ce,color:#1f1147
+Requirements: the VPC settings **DNS resolution** and **DNS hostnames** must both be on (you enabled hostnames in Module 01).
 
-    subgraph ONP["🏢 On-prem"]
-        ODNS["On-prem DNS servers<br/>10.200.0.53 / 10.200.1.53<br/>zone corp.example.com"]:::ext
-        OCL["💻 On-prem clients"]:::ext
-    end
+### DNS between AWS and your office
 
-    subgraph VPC["☁️ VPC 10.0.0.0/16"]
-        R2["🧭 Route 53 Resolver 10.0.0.2"]:::global
-        INB["📥 INBOUND endpoint<br/>ENIs 10.0.1.53 (AZ-a), 10.0.2.53 (AZ-b)<br/>🛡️ SG: 53 TCP/UDP from on-prem"]:::gw
-        OUTB["📤 OUTBOUND endpoint<br/>ENIs in 2 AZs<br/>🛡️ SG: 53 out to on-prem DNS"]:::gw
-        RULE["📜 Forwarding rule<br/>corp.example.com → 10.200.0.53, 10.200.1.53<br/>associated with VPCs (shareable via RAM)"]:::gw
-        EC2["🖥️ EC2 app"]:::compute
-        PHZ["Private hosted zone aws.example.com"]:::global
-    end
+Your office DNS servers can't query `10.0.0.2` over a VPN. That address only answers clients inside the VPC. **Route 53 Resolver endpoints** bridge the two:
+- An **inbound endpoint** gives the office DNS servers IP addresses inside your VPC to forward queries to, for example for `shop.internal`.
+- An **outbound endpoint** plus a **forwarding rule** lets VPC servers resolve office names: "send `corp.example.com` queries to the office DNS servers `192.168.0.53`".
 
-    EC2 -->|"① app.corp.example.com?"| R2
-    R2 -->|"② rule matches"| RULE
-    RULE --> OUTB
-    OUTB -->|"③ over DX / VPN"| ODNS
+### A DNS trap
 
-    OCL -->|"A: db.aws.example.com?"| ODNS
-    ODNS -->|"B: conditional forwarder<br/>aws.example.com → inbound IPs"| INB
-    INB --> R2
-    R2 -->|"C: answer from the PHZ"| PHZ
-```
-
-- On-prem **can't** query `.2` over VPN/Direct Connect. Give it a **Resolver inbound endpoint**.
-- AWS → on-prem lookups need an **outbound endpoint + forwarding rule** (`corp.example.com → on-prem DNS`). Rules can be shared across accounts with RAM.
-- **DHCP option sets** are immutable: to change one, create a new set and associate it. If you point instances at your own DNS servers, those servers must forward AWS names to `.2`, or private zones and endpoints break.
+You can change which DNS servers your instances use (with a **DHCP options set**). If you point them at your own DNS servers, those servers **must forward** AWS names to the VPC resolver. Otherwise, private hosted zones and interface endpoints silently stop working. Usually it's better to keep the AWS resolver and add forwarding rules.
 
 ---
 
-## 3. Hands-on: gateway endpoint, then remove the NAT
+## 3. Try it: a gateway endpoint and a private DNS name
+
+**3.1 Add the S3 gateway endpoint and watch the route table change:**
 
 ```bash
-aws ec2 describe-route-tables --route-table-ids $RT_PRIV --query 'RouteTables[0].Routes'   # before
+aws ec2 describe-route-tables --route-table-ids $RT_PRIV --query 'RouteTables[0].Routes[].[DestinationCidrBlock,DestinationPrefixListId,GatewayId,NatGatewayId]' --output table
 S3_EP=$(aws ec2 create-vpc-endpoint --vpc-id $VPC_ID --vpc-endpoint-type Gateway \
   --service-name com.amazonaws.$AWS_REGION.s3 --route-table-ids $RT_PRIV \
   --query VpcEndpoint.VpcEndpointId --output text); save S3_EP
-aws ec2 describe-route-tables --route-table-ids $RT_PRIV --query 'RouteTables[0].Routes'   # after: pl-… -> vpce-…
+aws ec2 describe-route-tables --route-table-ids $RT_PRIV --query 'RouteTables[0].Routes[].[DestinationCidrBlock,DestinationPrefixListId,GatewayId,NatGatewayId]' --output table
+#   new row: pl-xxxxxxxx -> vpce-xxxxxxxx
+```
 
-# Remove internet egress: S3 keeps working privately, the internet doesn't
+**3.2 Remove the NAT route.** S3 keeps working privately, while the rest of the internet doesn't:
+
+```bash
 aws ec2 delete-route --route-table-id $RT_PRIV --destination-cidr-block 0.0.0.0/0
 aws ec2-instance-connect ssh --instance-id $APP_ID --connection-type eice
-  curl -m 5 -s https://checkip.amazonaws.com || echo "internet: blocked"
-  curl -m 5 -s -o /dev/null -w "S3 HTTP %{http_code}\n" https://s3.us-east-1.amazonaws.com/   # use your Region
+  curl -m 5 -s https://checkip.amazonaws.com || echo "internet: blocked (no NAT route)"
+  curl -m 5 -s -o /dev/null -w "S3 answered with HTTP %{http_code}\n" https://s3.eu-central-1.amazonaws.com/   # use your Region
+  resolvectl status | grep "DNS Servers"           # the VPC resolver: 10.0.0.2
   exit
+```
 
-# Stop paying for the NAT gateway
-aws ec2 delete-nat-gateway --nat-gateway-id $NAT_ID
+Any HTTP status from S3 (200, 307, or 403) proves the network path works without NAT.
+
+**3.3 Delete the NAT gateway** (it's no longer needed, and it costs money):
+
+```bash
+aws ec2 delete-nat-gateway --nat-gateway-id $NAT_ID >/dev/null
 until [ "$(aws ec2 describe-nat-gateways --nat-gateway-ids $NAT_ID --query 'NatGateways[0].State' --output text)" = "deleted" ]; do sleep 15; done
 aws ec2 release-address --allocation-id $NAT_EIP
 ```
 
-Any HTTP status from S3 (200, 307, or 403) proves the private path works.
+**3.4 Create a private DNS name for `app-1`:**
+
+```bash
+ZONE_ID=$(aws route53 create-hosted-zone --name lab.internal --caller-reference lab-$(date +%s) \
+  --vpc VPCRegion=$AWS_REGION,VPCId=$VPC_ID --query HostedZone.Id --output text); save ZONE_ID
+aws route53 change-resource-record-sets --hosted-zone-id $ZONE_ID --change-batch "{\"Changes\":[{\"Action\":\"CREATE\",
+  \"ResourceRecordSet\":{\"Name\":\"app.lab.internal\",\"Type\":\"A\",\"TTL\":60,\"ResourceRecords\":[{\"Value\":\"$APP_PRIV\"}]}}]}" >/dev/null
+
+ssh -i ~/lab-key.pem ec2-user@$WEB_IP
+  getent hosts app.lab.internal              # -> 10.0.10.x : resolved by the VPC resolver from your private zone
+  curl -s http://app.lab.internal:8080       # -> hello from app-1
+  exit
+dig +short app.lab.internal                  # from your laptop: nothing. The zone is private to the VPC
+```
 
 ---
 
 ## Check yourself
 
-<details><summary>Gateway vs interface endpoint: how does each steer traffic?</summary>Gateway: a route table entry (prefix list → vpce). Interface: an ENI with a private IP, plus private DNS for the service name.</details>
-<details><summary>On-prem needs private S3 access over Direct Connect. Which endpoint?</summary>An S3 interface endpoint. Gateway endpoints only work from inside the VPC.</details>
-<details><summary>Can on-prem servers use 10.0.0.2 for DNS over a VPN?</summary>No. Use a Resolver inbound endpoint.</details>
+<details><summary>How does a gateway endpoint steer traffic, and how does an interface endpoint?</summary>Gateway: a route table entry (prefix list → endpoint). Interface: a network interface with a private IP, plus private DNS so the service name resolves to it.</details>
+<details><summary>Which AWS services have gateway endpoints?</summary>S3 and DynamoDB.</details>
+<details><summary>Your office servers need to reach S3 privately over a VPN. Gateway or interface endpoint?</summary>Interface endpoint. Gateway endpoints only work for traffic from inside the VPC.</details>
+<details><summary>What's at 10.0.0.2 in a VPC with range 10.0.0.0/16?</summary>The VPC's DNS resolver.</details>
 
 ---
-**Previous:** [Module 05](05-ec2-networking-and-load-balancers.md) · **Next:** [Module 07 — Connecting Networks](07-connecting-networks.md)
+**Previous:** [Module 05](05-load-balancers.md) · **Next:** [Module 07 — Connecting Networks](07-connecting-networks.md)
